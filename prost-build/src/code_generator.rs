@@ -178,6 +178,9 @@ impl<'a> CodeGenerator<'a> {
                 }
             });
 
+        let oneof_enum =
+            self.oneof_enum(&fq_message_name) && fields.is_empty() && message.oneof_decl.len() == 1;
+
         self.append_doc(&fq_message_name, None);
         self.append_type_attributes(&fq_message_name);
         self.append_message_attributes(&fq_message_name);
@@ -189,7 +192,11 @@ impl<'a> CodeGenerator<'a> {
             self.config.prost_path.as_deref().unwrap_or("::prost")
         ));
         self.push_indent();
-        self.buf.push_str("pub struct ");
+        if oneof_enum {
+            self.buf.push_str("pub enum ");
+        } else {
+            self.buf.push_str("pub struct ");
+        }
         self.buf.push_str(&to_upper_camel(&message_name));
         self.buf.push_str(" {\n");
 
@@ -211,20 +218,40 @@ impl<'a> CodeGenerator<'a> {
         }
         self.path.pop();
 
-        self.path.push(8);
-        for (idx, oneof) in message.oneof_decl.iter().enumerate() {
-            let idx = idx as i32;
+        if oneof_enum {
+            for (idx, oneof) in message.oneof_decl.clone().into_iter().enumerate() {
+                let idx = idx as i32;
+                // optional fields create a synthetic oneof that we want to skip
+                let fields = match oneof_fields.remove(&idx) {
+                    Some(fields) => fields,
+                    None => continue,
+                };
+                let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
+                self.path.push(8);
+                self.path.push(idx);
+                self.append_doc(&fq_message_name, None);
+                self.path.pop();
+                self.path.pop();
+                self.path.push(2);
+                self.append_oneof_fields(&fq_message_name, &oneof_name, fields);
+                self.path.pop();
+            }
+        } else {
+            self.path.push(8);
+            for (idx, oneof) in message.oneof_decl.iter().enumerate() {
+                let idx = idx as i32;
 
-            let fields = match oneof_fields.get_vec(&idx) {
-                Some(fields) => fields,
-                None => continue,
-            };
+                let fields = match oneof_fields.get_vec(&idx) {
+                    Some(fields) => fields,
+                    None => continue,
+                };
 
-            self.path.push(idx);
-            self.append_oneof_field(&message_name, &fq_message_name, oneof, fields);
+                self.path.push(idx);
+                self.append_oneof_field(&message_name, &fq_message_name, oneof, fields);
+                self.path.pop();
+            }
             self.path.pop();
         }
-        self.path.pop();
 
         self.depth -= 1;
         self.push_indent();
@@ -516,36 +543,12 @@ impl<'a> CodeGenerator<'a> {
         ));
     }
 
-    fn append_oneof(
+    fn append_oneof_fields(
         &mut self,
         fq_message_name: &str,
-        oneof: OneofDescriptorProto,
-        idx: i32,
+        oneof_name: &str,
         fields: Vec<(FieldDescriptorProto, usize)>,
     ) {
-        self.path.push(8);
-        self.path.push(idx);
-        self.append_doc(fq_message_name, None);
-        self.path.pop();
-        self.path.pop();
-
-        let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
-        self.append_type_attributes(&oneof_name);
-        self.append_enum_attributes(&oneof_name);
-        self.push_indent();
-        self.buf
-            .push_str("#[allow(clippy::derive_partial_eq_without_eq)]\n");
-        self.buf.push_str(&format!(
-            "#[derive(Clone, PartialEq, {}::Oneof)]\n",
-            self.config.prost_path.as_deref().unwrap_or("::prost")
-        ));
-        self.push_indent();
-        self.buf.push_str("pub enum ");
-        self.buf.push_str(&to_upper_camel(oneof.name()));
-        self.buf.push_str(" {\n");
-
-        self.path.push(2);
-        self.depth += 1;
         for (field, idx) in fields {
             let type_ = field.r#type();
 
@@ -593,9 +596,40 @@ impl<'a> CodeGenerator<'a> {
                     .push_str(&format!("{}({}),\n", to_upper_camel(field.name()), ty));
             }
         }
-        self.depth -= 1;
+    }
+
+    fn append_oneof(
+        &mut self,
+        fq_message_name: &str,
+        oneof: OneofDescriptorProto,
+        idx: i32,
+        fields: Vec<(FieldDescriptorProto, usize)>,
+    ) {
+        self.path.push(8);
+        self.path.push(idx);
+        self.append_doc(fq_message_name, None);
+        self.path.pop();
         self.path.pop();
 
+        let oneof_name = format!("{}.{}", fq_message_name, oneof.name());
+        self.append_type_attributes(&oneof_name);
+        self.append_enum_attributes(&oneof_name);
+        self.push_indent();
+        self.buf
+            .push_str("#[allow(clippy::derive_partial_eq_without_eq)]\n");
+        self.buf.push_str(&format!(
+            "#[derive(Clone, PartialEq, {}::Oneof)]\n",
+            self.config.prost_path.as_deref().unwrap_or("::prost")
+        ));
+        self.push_indent();
+        self.buf.push_str("pub enum ");
+        self.buf.push_str(&to_upper_camel(oneof.name()));
+        self.buf.push_str(" {\n");
+        self.path.push(2);
+        self.depth += 1;
+        self.append_oneof_fields(fq_message_name, &oneof_name, fields);
+        self.depth -= 1;
+        self.path.pop();
         self.push_indent();
         self.buf.push_str("}\n");
     }
@@ -1005,6 +1039,10 @@ impl<'a> CodeGenerator<'a> {
             .enumerate_fields
             .get_first_field(&fq_message_name, field.name())
             .is_some()
+    }
+
+    fn oneof_enum(&self, fq_message_name: &str) -> bool {
+        self.config.oneof_enums.get_first(fq_message_name).is_some()
     }
 
     fn optional(&self, field: &FieldDescriptorProto) -> bool {

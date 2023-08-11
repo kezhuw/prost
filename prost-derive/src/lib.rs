@@ -12,11 +12,180 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::{
     punctuated::Punctuated, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FieldsNamed,
-    FieldsUnnamed, Ident, Index, Variant,
+    FieldsUnnamed, Generics, Ident, Index, Token, Variant,
 };
 
 mod field;
 use crate::field::Field;
+
+fn gen_enum_message(
+    ident: Ident,
+    variants: Punctuated<Variant, Token![,]>,
+    generics: Generics,
+) -> Result<TokenStream, Error> {
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    // Map the variants into 'fields'.
+    let mut fields: Vec<(Ident, Field)> = Vec::new();
+    for Variant {
+        attrs,
+        ident: variant_ident,
+        fields: variant_fields,
+        ..
+    } in variants
+    {
+        let variant_fields = match variant_fields {
+            Fields::Unit => Punctuated::new(),
+            Fields::Named(FieldsNamed { named: fields, .. })
+            | Fields::Unnamed(FieldsUnnamed {
+                unnamed: fields, ..
+            }) => fields,
+        };
+        if variant_fields.len() != 1 {
+            bail!("Oneof enum variants must have a single field");
+        }
+        match Field::new_oneof(attrs)? {
+            Some(field) => fields.push((variant_ident, field)),
+            None => bail!("invalid oneof variant: oneof variants may not be ignored"),
+        }
+    }
+
+    let mut tags = fields
+        .iter()
+        .flat_map(|&(ref variant_ident, ref field)| -> Result<u32, Error> {
+            if field.tags().len() > 1 {
+                bail!(
+                    "invalid oneof variant {}::{}: oneof variants may only have a single tag",
+                    ident,
+                    variant_ident
+                );
+            }
+            Ok(field.tags()[0])
+        })
+        .collect::<Vec<_>>();
+    tags.sort_unstable();
+    tags.dedup();
+    if tags.len() != fields.len() {
+        panic!("invalid oneof {}: variants have duplicate tags", ident);
+    }
+
+    let encode = fields.iter().map(|&(ref variant_ident, ref field)| {
+        let encode = field.encode(quote!(*value));
+        quote!(#ident::#variant_ident(ref value) => { #encode })
+    });
+
+    let merge = fields.iter().map(|&(ref variant_ident, ref field)| {
+        let tag = field.tags()[0];
+        let merge = field.merge(quote!(value));
+        quote! {
+            #tag => {
+                match self {
+                    #ident::#variant_ident(ref mut value) => {
+                        #merge
+                    },
+                    _ => {
+                        let mut owned_value = ::core::default::Default::default();
+                        let value = &mut owned_value;
+                        #merge.map(|_| *self = #ident::#variant_ident(owned_value))
+                    },
+                }
+            }
+        }
+    });
+
+    let (first_variant_ident, _) = fields.first().unwrap();
+    let default = quote!(#ident::#first_variant_ident(::core::default::Default::default()));
+
+    let encoded_len = fields.iter().map(|&(ref variant_ident, ref field)| {
+        let encoded_len = field.encoded_len(quote!(*value));
+        quote!(#ident::#variant_ident(ref value) => #encoded_len)
+    });
+
+    let debug = fields.iter().map(|&(ref variant_ident, ref field)| {
+        let wrapper = field.debug(quote!(*value));
+        quote!(#ident::#variant_ident(ref value) => {
+            let wrapper = #wrapper;
+            f.debug_tuple(stringify!(#variant_ident))
+                .field(&wrapper)
+                .finish()
+        })
+    });
+
+    let expanded = quote! {
+        impl #impl_generics ::prost::Message for #ident #ty_generics #where_clause {
+            #[allow(unused_variables)]
+            fn encode_raw<B>(&self, buf: &mut B) where B: ::prost::bytes::BufMut {
+                match *self {
+                    #(#encode,)*
+                }
+            }
+
+            #[allow(unused_variables)]
+            fn merge_field<B>(
+                &mut self,
+                tag: u32,
+                wire_type: ::prost::encoding::WireType,
+                buf: &mut B,
+                ctx: ::prost::encoding::DecodeContext,
+            ) -> ::core::result::Result<(), ::prost::DecodeError>
+            where B: ::prost::bytes::Buf {
+                match tag {
+                    #(#merge)*
+                    _ => Err(::prost::DecodeError::new(::prost::alloc::format!(concat!("invalid ", stringify!(#ident), " tag: {}"), tag))),
+                }
+            }
+
+            /// Decodes an instance of the message from a buffer, and merges it into `self`.
+            ///
+            /// The entire buffer will be consumed.
+            fn merge<B>(&mut self, mut buf: B) -> ::core::result::Result<(), ::prost::DecodeError>
+            where
+                B: ::prost::bytes::Buf,
+                Self: Sized,
+            {
+                let ctx = ::prost::encoding::DecodeContext::default();
+                let mut decoded = false;
+                while buf.has_remaining() {
+                    let (tag, wire_type) = ::prost::encoding::decode_key(&mut buf)?;
+                    self.merge_field(tag, wire_type, &mut buf, ctx.clone())?;
+                    decoded = true;
+                }
+                if !decoded {
+                    return Err(::prost::DecodeError::new(concat!("no ", stringify!(#ident), " variant")));
+                }
+                Ok(())
+            }
+
+            /// Returns the encoded length of the message without a length delimiter.
+            #[inline]
+            fn encoded_len(&self) -> usize {
+                match *self {
+                    #(#encoded_len,)*
+                }
+            }
+
+            fn clear(&mut self) {
+                *self = ::core::default::Default::default();
+            }
+        }
+
+        impl #impl_generics ::core::default::Default for #ident #ty_generics #where_clause {
+            fn default() -> Self {
+                #default
+            }
+        }
+
+        impl #impl_generics ::core::fmt::Debug for #ident #ty_generics #where_clause {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+                match *self {
+                    #(#debug,)*
+                }
+            }
+        }
+    };
+
+    Ok(expanded.into())
+}
 
 fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
     let input: DeriveInput = syn::parse(input)?;
@@ -25,7 +194,9 @@ fn try_message(input: TokenStream) -> Result<TokenStream, Error> {
 
     let variant_data = match input.data {
         Data::Struct(variant_data) => variant_data,
-        Data::Enum(..) => bail!("Message can not be derived for an enum"),
+        Data::Enum(DataEnum { variants, .. }) => {
+            return gen_enum_message(ident, variants, input.generics)
+        }
         Data::Union(..) => bail!("Message can not be derived for a union"),
     };
 

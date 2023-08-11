@@ -406,7 +406,8 @@ impl<'a> CodeGenerator<'a> {
         let type_ = field.descriptor.r#type();
         let repeated = field.descriptor.label == Some(Label::Repeated as i32);
         let deprecated = self.deprecated(&field.descriptor);
-        let optional = self.optional(&field.descriptor);
+        let required = self.required(fq_message_name, &field.descriptor);
+        let optional = !required && self.optional(&field.descriptor);
         let boxed = self.boxed(&field.descriptor, fq_message_name, None);
         let ty = self.resolve_type(&field.descriptor, fq_message_name);
 
@@ -444,6 +445,8 @@ impl<'a> CodeGenerator<'a> {
             Label::Optional => {
                 if optional {
                     self.buf.push_str(", optional");
+                } else if required {
+                    self.buf.push_str(", required");
                 }
             }
             Label::Required => self.buf.push_str(", required"),
@@ -1046,6 +1049,13 @@ impl<'a> CodeGenerator<'a> {
             )),
             _ => self.field_type_tag(field),
         }
+    }
+
+    fn required(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> bool {
+        self.config
+            .require_fields
+            .get_first_field(&fq_message_name, field.name())
+            .is_some()
     }
 
     fn optional(&self, field: &FieldDescriptorProto) -> bool {

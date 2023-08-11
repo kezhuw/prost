@@ -427,7 +427,7 @@ impl<'a> CodeGenerator<'a> {
 
         self.push_indent();
         self.buf.push_str("#[prost(");
-        let type_tag = self.field_type_tag(&field.descriptor);
+        let type_tag = self.field_type_tag(fq_message_name, &field.descriptor);
         self.buf.push_str(&type_tag);
 
         if type_ == Type::Bytes {
@@ -556,8 +556,8 @@ impl<'a> CodeGenerator<'a> {
             .get_first_field(fq_message_name, field.descriptor.name())
             .copied()
             .unwrap_or_default();
-        let key_tag = self.field_type_tag(key);
-        let value_tag = self.map_value_type_tag(value);
+        let key_tag = self.field_type_tag(fq_message_name, key);
+        let value_tag = self.map_value_type_tag(fq_message_name, value);
 
         self.buf.push_str(&format!(
             "#[prost({}=\"{}, {}\", tag=\"{}\")]\n",
@@ -645,7 +645,7 @@ impl<'a> CodeGenerator<'a> {
             self.path.pop();
 
             self.push_indent();
-            let ty_tag = self.field_type_tag(&field.descriptor);
+            let ty_tag = self.field_type_tag(fq_message_name, &field.descriptor);
             self.buf.push_str(&format!(
                 "#[prost({}, tag=\"{}\")]\n",
                 ty_tag,
@@ -961,8 +961,20 @@ impl<'a> CodeGenerator<'a> {
             Type::Double => String::from("f64"),
             Type::Uint32 | Type::Fixed32 => String::from("u32"),
             Type::Uint64 | Type::Fixed64 => String::from("u64"),
-            Type::Int32 | Type::Sfixed32 | Type::Sint32 | Type::Enum => String::from("i32"),
+            Type::Int32 | Type::Sfixed32 | Type::Sint32 => String::from("i32"),
             Type::Int64 | Type::Sfixed64 | Type::Sint64 => String::from("i64"),
+            Type::Enum => {
+                if self
+                    .config
+                    .enumerate_fields
+                    .get_first_field(&fq_message_name, field.name())
+                    .is_some()
+                {
+                    self.resolve_ident(field.type_name())
+                } else {
+                    String::from("i32")
+                }
+            }
             Type::Bool => String::from("bool"),
             Type::String => format!("{}::alloc::string::String", prost_path(self.config)),
             Type::Bytes => self
@@ -1015,7 +1027,7 @@ impl<'a> CodeGenerator<'a> {
             .join("::")
     }
 
-    fn field_type_tag(&self, field: &FieldDescriptorProto) -> Cow<'static, str> {
+    fn type_tag(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> Cow<'static, str> {
         match field.r#type() {
             Type::Float => Cow::Borrowed("float"),
             Type::Double => Cow::Borrowed("double"),
@@ -1034,26 +1046,54 @@ impl<'a> CodeGenerator<'a> {
             Type::Bytes => Cow::Borrowed("bytes"),
             Type::Group => Cow::Borrowed("group"),
             Type::Message => Cow::Borrowed("message"),
-            Type::Enum => Cow::Owned(format!(
-                "enumeration={:?}",
-                self.resolve_ident(field.type_name())
-            )),
+            Type::Enum => {
+                let mut tag = self.resolve_ident(field.type_name());
+                if self.enumerated(fq_message_name, field) {
+                    tag.insert(0, '!');
+                }
+                Cow::Owned(tag)
+            }
         }
     }
 
-    fn map_value_type_tag(&self, field: &FieldDescriptorProto) -> Cow<'static, str> {
+    fn field_type_tag(
+        &self,
+        fq_message_name: &str,
+        field: &FieldDescriptorProto,
+    ) -> Cow<'static, str> {
+        match field.r#type() {
+            Type::Enum => Cow::Owned(format!(
+                "enumeration=\"{}\"",
+                self.type_tag(fq_message_name, field)
+            )),
+            _ => self.type_tag(fq_message_name, field),
+        }
+    }
+
+    fn map_value_type_tag(
+        &self,
+        fq_message_name: &str,
+        field: &FieldDescriptorProto,
+    ) -> Cow<'static, str> {
         match field.r#type() {
             Type::Enum => Cow::Owned(format!(
                 "enumeration({})",
-                self.resolve_ident(field.type_name())
+                self.type_tag(fq_message_name, field)
             )),
-            _ => self.field_type_tag(field),
+            _ => self.type_tag(fq_message_name, field),
         }
     }
 
     fn required(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> bool {
         self.config
             .require_fields
+            .get_first_field(&fq_message_name, field.name())
+            .is_some()
+    }
+
+    fn enumerated(&self, fq_message_name: &str, field: &FieldDescriptorProto) -> bool {
+        self.config
+            .enumerate_fields
             .get_first_field(&fq_message_name, field.name())
             .is_some()
     }

@@ -106,13 +106,13 @@ impl Field {
     }
 
     pub fn encode(&self, ident: TokenStream) -> TokenStream {
-        let module = self.ty.module();
+        let module = self.ty.module_path();
         let encode_fn = match self.kind {
             Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(encode),
             Kind::Repeated => quote!(encode_repeated),
             Kind::Packed => quote!(encode_packed),
         };
-        let encode_fn = quote!(::prost::encoding::#module::#encode_fn);
+        let encode_fn = quote!(#module::#encode_fn);
         let tag = self.tag;
 
         match self.kind {
@@ -138,12 +138,12 @@ impl Field {
     /// Returns an expression which evaluates to the result of merging a decoded
     /// scalar value into the field.
     pub fn merge(&self, ident: TokenStream) -> TokenStream {
-        let module = self.ty.module();
+        let module = self.ty.module_path();
         let merge_fn = match self.kind {
             Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(merge),
             Kind::Repeated | Kind::Packed => quote!(merge_repeated),
         };
-        let merge_fn = quote!(::prost::encoding::#module::#merge_fn);
+        let merge_fn = quote!(#module::#merge_fn);
 
         match self.kind {
             Kind::Plain(..) | Kind::Required(..) | Kind::Repeated | Kind::Packed => quote! {
@@ -160,13 +160,13 @@ impl Field {
 
     /// Returns an expression which evaluates to the encoded length of the field.
     pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
-        let module = self.ty.module();
+        let module = self.ty.module_path();
         let encoded_len_fn = match self.kind {
             Kind::Plain(..) | Kind::Optional(..) | Kind::Required(..) => quote!(encoded_len),
             Kind::Repeated => quote!(encoded_len_repeated),
             Kind::Packed => quote!(encoded_len_packed),
         };
-        let encoded_len_fn = quote!(::prost::encoding::#module::#encoded_len_fn);
+        let encoded_len_fn = quote!(#module::#encoded_len_fn);
         let tag = self.tag;
 
         match self.kind {
@@ -214,7 +214,11 @@ impl Field {
 
     /// An inner debug wrapper, around the base type.
     fn debug_inner(&self, wrap_name: TokenStream) -> TokenStream {
-        if let Ty::Enumeration(ref ty) = self.ty {
+        if let Ty::Enumeration(EnumerationTy {
+            path: ref ty,
+            numeric: true,
+        }) = self.ty
+        {
             quote! {
                 struct #wrap_name<'a>(&'a i32);
                 impl<'a> ::core::fmt::Debug for #wrap_name<'a> {
@@ -284,7 +288,11 @@ impl Field {
             Err(_) => quote!(#ident),
         };
 
-        if let Ty::Enumeration(ref ty) = self.ty {
+        if let Ty::Enumeration(EnumerationTy {
+            path: ref ty,
+            numeric,
+        }) = self.ty
+        {
             let set = Ident::new(&format!("set_{}", ident_str), Span::call_site());
             let set_doc = format!("Sets `{}` to the provided enum value.", ident_str);
             Some(match self.kind {
@@ -294,6 +302,19 @@ impl Field {
                          or the default if the field is set to an invalid enum value.",
                         ident_str,
                     );
+                    if !numeric {
+                        return Some(quote! {
+                            #[doc=#get_doc]
+                            pub fn #get(&self) -> #ty {
+                                self.#ident
+                            }
+
+                            #[doc=#set_doc]
+                            pub fn #set(&mut self, value: #ty) {
+                                self.#ident = value;
+                            }
+                        });
+                    }
                     quote! {
                         #[doc=#get_doc]
                         pub fn #get(&self) -> #ty {
@@ -312,6 +333,19 @@ impl Field {
                          or the default if the field is unset or set to an invalid enum value.",
                         ident_str,
                     );
+                    if !numeric {
+                        return Some(quote! {
+                            #[doc=#get_doc]
+                            pub fn #get(&self) -> #ty {
+                                self.#ident.unwrap_or(#default)
+                            }
+
+                            #[doc=#set_doc]
+                            pub fn #set(&mut self, value: #ty) {
+                                self.#ident = ::core::option::Option::Some(value);
+                            }
+                        });
+                    }
                     quote! {
                         #[doc=#get_doc]
                         pub fn #get(&self) -> #ty {
@@ -334,6 +368,18 @@ impl Field {
                     );
                     let push = Ident::new(&format!("push_{}", ident_str), Span::call_site());
                     let push_doc = format!("Appends the provided enum value to `{}`.", ident_str);
+                    if !numeric {
+                        return Some(quote! {
+                            #[doc=#iter_doc]
+                            pub fn #get(&self) -> ::core::iter::Cloned<::core::slice::Iter<#ty>> {
+                                self.#ident.iter().cloned()
+                            }
+                            #[doc=#push_doc]
+                            pub fn #push(&mut self, value: #ty) {
+                                self.#ident.push(value);
+                            }
+                        });
+                    }
                     quote! {
                         #[doc=#iter_doc]
                         pub fn #get(&self) -> ::core::iter::FilterMap<
@@ -399,7 +445,33 @@ pub enum Ty {
     Bool,
     String,
     Bytes(BytesTy),
-    Enumeration(Path),
+    Enumeration(EnumerationTy),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct EnumerationTy {
+    pub path: Path,
+    pub numeric: bool,
+}
+
+impl EnumerationTy {
+    fn try_from_str(s: &str) -> Result<Self, Error> {
+        let (path, numeric) = if let Some('!') = s.chars().nth(0) {
+            (parse_str::<Path>(&s[1..])?, false)
+        } else {
+            (parse_str(s)?, true)
+        };
+        Ok(Self { path, numeric })
+    }
+}
+
+impl From<Path> for EnumerationTy {
+    fn from(path: Path) -> Self {
+        Self {
+            path,
+            numeric: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -460,9 +532,11 @@ impl Ty {
                         ..
                     }),
                 ..
-            }) if path.is_ident("enumeration") => Ty::Enumeration(parse_str::<Path>(&l.value())?),
+            }) if path.is_ident("enumeration") => {
+                Ty::Enumeration(EnumerationTy::try_from_str(&l.value())?)
+            }
             Meta::List(ref meta_list) if meta_list.path.is_ident("enumeration") => {
-                Ty::Enumeration(meta_list.parse_args::<Path>()?)
+                Ty::Enumeration(EnumerationTy::from(meta_list.parse_args::<Path>()?))
             }
             _ => return Ok(None),
         };
@@ -499,7 +573,7 @@ impl Ty {
                     _ => return error,
                 }
 
-                Ty::Enumeration(parse_str::<Path>(s[1..s.len() - 1].trim())?)
+                Ty::Enumeration(EnumerationTy::try_from_str(s[1..s.len() - 1].trim())?)
             }
             _ => return error,
         };
@@ -555,7 +629,13 @@ impl Ty {
             Ty::Bool => quote!(bool),
             Ty::String => quote!(&str),
             Ty::Bytes(..) => quote!(&[u8]),
-            Ty::Enumeration(..) => quote!(i32),
+            Ty::Enumeration(EnumerationTy { ref path, numeric }) => {
+                if numeric {
+                    quote!(i32)
+                } else {
+                    quote!(#path)
+                }
+            }
         }
     }
 
@@ -563,6 +643,19 @@ impl Ty {
         match *self {
             Ty::Enumeration(..) => Ident::new("int32", Span::call_site()),
             _ => Ident::new(self.as_str(), Span::call_site()),
+        }
+    }
+
+    pub fn module_path(&self) -> TokenStream {
+        match self {
+            Ty::Enumeration(EnumerationTy { path, numeric }) => {
+                if *numeric {
+                    parse_str("::prost::encoding::int32").unwrap()
+                } else {
+                    quote!(#path)
+                }
+            }
+            _ => parse_str(&format!("::prost::encoding::{}", self.as_str())).unwrap(),
         }
     }
 
@@ -611,7 +704,7 @@ pub enum DefaultValue {
     Bool(bool),
     String(String),
     Bytes(Vec<u8>),
-    Enumeration(TokenStream),
+    Enumeration { token: TokenStream, numeric: bool },
     Path(Path),
 }
 
@@ -675,9 +768,12 @@ impl DefaultValue {
                 let value = lit.value();
                 let value = value.trim();
 
-                if let Ty::Enumeration(ref path) = *ty {
+                if let Ty::Enumeration(EnumerationTy { ref path, numeric }) = *ty {
                     let variant = Ident::new(value, Span::call_site());
-                    return Ok(DefaultValue::Enumeration(quote!(#path::#variant)));
+                    return Ok(DefaultValue::Enumeration {
+                        token: quote!(#path::#variant),
+                        numeric,
+                    });
                 }
 
                 // Parse special floating point values.
@@ -775,7 +871,10 @@ impl DefaultValue {
             Ty::Bool => DefaultValue::Bool(false),
             Ty::String => DefaultValue::String(String::new()),
             Ty::Bytes(..) => DefaultValue::Bytes(Vec::new()),
-            Ty::Enumeration(ref path) => DefaultValue::Enumeration(quote!(#path::default())),
+            Ty::Enumeration(EnumerationTy { ref path, numeric }) => DefaultValue::Enumeration {
+                token: quote!(#path::default()),
+                numeric,
+            },
         }
     }
 
@@ -798,10 +897,9 @@ impl DefaultValue {
     }
 
     pub fn typed(&self) -> TokenStream {
-        if let DefaultValue::Enumeration(_) = *self {
-            quote!(#self as i32)
-        } else {
-            quote!(#self)
+        match self {
+            DefaultValue::Enumeration { numeric: true, .. } => quote!(#self as i32),
+            _ => quote!(#self),
         }
     }
 }
@@ -821,7 +919,7 @@ impl ToTokens for DefaultValue {
                 let byte_str = LitByteStr::new(value, Span::call_site());
                 tokens.append_all(quote!(#byte_str as &[u8]));
             }
-            DefaultValue::Enumeration(ref value) => value.to_tokens(tokens),
+            DefaultValue::Enumeration { ref token, .. } => token.to_tokens(tokens),
             DefaultValue::Path(ref value) => value.to_tokens(tokens),
         }
     }

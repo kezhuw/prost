@@ -126,19 +126,20 @@ impl Field {
     /// Returns a statement which encodes the map field.
     pub fn encode(&self, ident: TokenStream) -> TokenStream {
         let tag = self.tag;
-        let key_mod = self.key_ty.module();
-        let ke = quote!(::prost::encoding::#key_mod::encode);
-        let kl = quote!(::prost::encoding::#key_mod::encoded_len);
+        let key_mod = self.key_ty.module_path();
+        let ke = quote!(#key_mod::encode);
+        let kl = quote!(#key_mod::encoded_len);
         let module = self.map_ty.module();
         match &self.value_ty {
-            ValueTy::Scalar(scalar::Ty::Enumeration(ty)) => {
-                let default = quote!(#ty::default() as i32);
+            ValueTy::Scalar(ty @ scalar::Ty::Enumeration(_)) => {
+                let value_mod = ty.module_path();
+                let default = scalar::DefaultValue::new(ty).typed();
                 quote! {
                     ::prost::encoding::#module::encode_with_default(
                         #ke,
                         #kl,
-                        ::prost::encoding::int32::encode,
-                        ::prost::encoding::int32::encoded_len,
+                        #value_mod::encode,
+                        #value_mod::encoded_len,
                         &(#default),
                         #tag,
                         &#ident,
@@ -179,16 +180,17 @@ impl Field {
     /// Returns an expression which evaluates to the result of merging a decoded key value pair
     /// into the map.
     pub fn merge(&self, ident: TokenStream) -> TokenStream {
-        let key_mod = self.key_ty.module();
-        let km = quote!(::prost::encoding::#key_mod::merge);
+        let key_mod = self.key_ty.module_path();
+        let km = quote!(#key_mod::merge);
         let module = self.map_ty.module();
         match &self.value_ty {
-            ValueTy::Scalar(scalar::Ty::Enumeration(ty)) => {
-                let default = quote!(#ty::default() as i32);
+            ValueTy::Scalar(ty @ scalar::Ty::Enumeration(_)) => {
+                let value_mod = ty.module_path();
+                let default = scalar::DefaultValue::new(ty).typed();
                 quote! {
                     ::prost::encoding::#module::merge_with_default(
                         #km,
-                        ::prost::encoding::int32::merge,
+                        #value_mod::merge,
                         #default,
                         &mut #ident,
                         buf,
@@ -216,16 +218,17 @@ impl Field {
     /// Returns an expression which evaluates to the encoded length of the map.
     pub fn encoded_len(&self, ident: TokenStream) -> TokenStream {
         let tag = self.tag;
-        let key_mod = self.key_ty.module();
-        let kl = quote!(::prost::encoding::#key_mod::encoded_len);
+        let key_mod = self.key_ty.module_path();
+        let kl = quote!(#key_mod::encoded_len);
         let module = self.map_ty.module();
         match &self.value_ty {
-            ValueTy::Scalar(scalar::Ty::Enumeration(ty)) => {
-                let default = quote!(#ty::default() as i32);
+            ValueTy::Scalar(ty @ scalar::Ty::Enumeration(_)) => {
+                let value_mod = ty.module_path();
+                let default = scalar::DefaultValue::new(ty).typed();
                 quote! {
                     ::prost::encoding::#module::encoded_len_with_default(
                         #kl,
-                        ::prost::encoding::int32::encoded_len,
+                        #value_mod::encoded_len,
                         &(#default),
                         #tag,
                         &#ident,
@@ -254,7 +257,11 @@ impl Field {
 
     /// Returns methods to embed in the message.
     pub fn methods(&self, ident: &TokenStream) -> Option<TokenStream> {
-        if let ValueTy::Scalar(scalar::Ty::Enumeration(ty)) = &self.value_ty {
+        if let ValueTy::Scalar(scalar::Ty::Enumeration(scalar::EnumerationTy {
+            path: ty,
+            numeric,
+        })) = &self.value_ty
+        {
             let key_ty = self.key_ty.rust_type();
             let key_ref_ty = self.key_ty.rust_ref_type();
 
@@ -272,6 +279,18 @@ impl Field {
                 ident,
             );
             let insert_doc = format!("Inserts a key value pair into `{}`.", ident);
+            if !*numeric {
+                return Some(quote! {
+                    #[doc=#get_doc]
+                    pub fn #get(&self, key: #key_ref_ty) -> ::core::option::Option<#ty> {
+                        self.#ident.get(#take_ref key).cloned()
+                    }
+                    #[doc=#insert_doc]
+                    pub fn #insert(&mut self, key: #key_ty, value: #ty) -> ::core::option::Option<#ty> {
+                        self.#ident.insert(key, value)
+                    }
+                });
+            }
             Some(quote! {
                 #[doc=#get_doc]
                 pub fn #get(&self, key: #key_ref_ty) -> ::core::option::Option<#ty> {

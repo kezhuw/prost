@@ -37,6 +37,7 @@ pub struct Config {
     pub(crate) field_attributes: PathMap<String>,
     pub(crate) require_fields: PathMap<()>,
     pub(crate) enumerate_fields: PathMap<()>,
+    pub(crate) oneof_enums: PathMap<()>,
     pub(crate) boxed: PathMap<()>,
     pub(crate) prost_types: bool,
     pub(crate) strip_enum_prefix: bool,
@@ -229,6 +230,14 @@ impl Config {
         P: AsRef<str>,
     {
         self.enumerate_fields.insert(path.as_ref().to_string(), ());
+        self
+    }
+
+    pub fn oneof_enum<P>(&mut self, path: P) -> &mut Self
+    where
+        P: AsRef<str>,
+    {
+        self.oneof_enums.insert(path.as_ref().to_string(), ());
         self
     }
 
@@ -1115,6 +1124,7 @@ impl default::Default for Config {
             field_attributes: PathMap::default(),
             require_fields: PathMap::default(),
             enumerate_fields: PathMap::default(),
+            oneof_enums: PathMap::default(),
             boxed: PathMap::default(),
             prost_types: true,
             strip_enum_prefix: true,
@@ -1146,6 +1156,7 @@ impl fmt::Debug for Config {
             .field("field_attributes", &self.field_attributes)
             .field("require_fields", &self.require_fields)
             .field("enumerate_fields", &self.enumerate_fields)
+            .field("oneof_enums", &self.oneof_enums)
             .field("prost_types", &self.prost_types)
             .field("strip_enum_prefix", &self.strip_enum_prefix)
             .field("out_dir", &self.out_dir)

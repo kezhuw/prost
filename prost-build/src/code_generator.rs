@@ -211,6 +211,8 @@ impl<'a> CodeGenerator<'a> {
                     Either::Left(Field::new(proto, idx))
                 }
             });
+        let oneof_enum =
+            self.oneof_enum(&fq_message_name) && fields.is_empty() && message.oneof_decl.len() == 1;
         // Optional fields create a synthetic oneof that we want to skip
         let oneof_fields: Vec<OneofField> = message
             .oneof_decl
@@ -241,7 +243,11 @@ impl<'a> CodeGenerator<'a> {
         ));
         self.append_skip_debug(&fq_message_name);
         self.push_indent();
-        self.buf.push_str("pub struct ");
+        if oneof_enum {
+            self.buf.push_str("pub enum ");
+        } else {
+            self.buf.push_str("pub struct ");
+        }
         self.buf.push_str(&to_upper_camel(&message_name));
         self.buf.push_str(" {\n");
 
@@ -262,19 +268,32 @@ impl<'a> CodeGenerator<'a> {
         }
         self.path.pop();
 
-        self.path.push(8);
-        for oneof in &oneof_fields {
-            self.path.push(oneof.path_index);
-            self.append_oneof_field(&message_name, &fq_message_name, oneof);
+        if oneof_enum {
+            for oneof in &oneof_fields {
+                self.path.push(8);
+                self.path.push(oneof.path_index);
+                self.append_doc(&fq_message_name, None);
+                self.path.pop();
+                self.path.pop();
+                self.path.push(2);
+                self.append_oneof_fields(&fq_message_name, &oneof);
+                self.path.pop();
+            }
+        } else {
+            self.path.push(8);
+            for oneof in &oneof_fields {
+                self.path.push(oneof.path_index);
+                self.append_oneof_field(&message_name, &fq_message_name, oneof);
+                self.path.pop();
+            }
             self.path.pop();
         }
-        self.path.pop();
 
         self.depth -= 1;
         self.push_indent();
         self.buf.push_str("}\n");
 
-        if !message.enum_type.is_empty() || !nested_types.is_empty() || !oneof_fields.is_empty() {
+        if !message.enum_type.is_empty() || !nested_types.is_empty() || (!oneof_fields.is_empty() && !oneof_enum) {
             self.push_mod(&message_name);
             self.path.push(3);
             for (nested_type, idx) in nested_types {
@@ -639,6 +658,19 @@ impl<'a> CodeGenerator<'a> {
 
         self.path.push(2);
         self.depth += 1;
+        self.append_oneof_fields(fq_message_name, oneof);
+        self.depth -= 1;
+        self.path.pop();
+        self.push_indent();
+        self.buf.push_str("}\n");
+    }
+
+    fn append_oneof_fields(
+        &mut self,
+        fq_message_name: &str,
+        oneof: &OneofField,
+    ) {
+        let oneof_name = format!("{}.{}", fq_message_name, oneof.descriptor.name());
         for field in &oneof.fields {
             self.path.push(field.path_index);
             self.append_doc(fq_message_name, Some(field.descriptor.name()));
@@ -683,11 +715,6 @@ impl<'a> CodeGenerator<'a> {
                 ));
             }
         }
-        self.depth -= 1;
-        self.path.pop();
-
-        self.push_indent();
-        self.buf.push_str("}\n");
     }
 
     fn location(&self) -> Option<&Location> {
@@ -1096,6 +1123,10 @@ impl<'a> CodeGenerator<'a> {
             .enumerate_fields
             .get_first_field(&fq_message_name, field.name())
             .is_some()
+    }
+
+    fn oneof_enum(&self, fq_message_name: &str) -> bool {
+        self.config.oneof_enums.get_first(fq_message_name).is_some()
     }
 
     fn optional(&self, field: &FieldDescriptorProto) -> bool {

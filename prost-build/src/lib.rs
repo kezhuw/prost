@@ -248,6 +248,7 @@ pub struct Config {
     enum_attributes: PathMap<String>,
     field_attributes: PathMap<String>,
     require_fields: PathMap<()>,
+    enumerate_fields: PathMap<()>,
     boxed: PathMap<()>,
     prost_types: bool,
     strip_enum_prefix: bool,
@@ -428,6 +429,14 @@ impl Config {
         P: AsRef<str>,
     {
         self.require_fields.insert(path.as_ref().to_string(), ());
+        self
+    }
+
+    pub fn enumerate_field<P>(&mut self, path: P) -> &mut Self
+    where
+        P: AsRef<str>,
+    {
+        self.enumerate_fields.insert(path.as_ref().to_string(), ());
         self
     }
 
@@ -1246,6 +1255,7 @@ impl default::Default for Config {
             enum_attributes: PathMap::default(),
             field_attributes: PathMap::default(),
             require_fields: PathMap::default(),
+            enumerate_fields: PathMap::default(),
             boxed: PathMap::default(),
             prost_types: true,
             strip_enum_prefix: true,
@@ -1272,6 +1282,7 @@ impl fmt::Debug for Config {
             .field("type_attributes", &self.type_attributes)
             .field("field_attributes", &self.field_attributes)
             .field("require_fields", &self.require_fields)
+            .field("enumerate_fields", &self.enumerate_fields)
             .field("prost_types", &self.prost_types)
             .field("strip_enum_prefix", &self.strip_enum_prefix)
             .field("out_dir", &self.out_dir)

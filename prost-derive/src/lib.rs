@@ -274,7 +274,7 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
 
         match discriminant {
             Some((_, expr)) => variants.push((ident, expr)),
-            None => bail!("Enumeration variants must have a disriminant"),
+            None => bail!("Enumeration variants must have a discriminant"),
         }
     }
 
@@ -313,6 +313,61 @@ fn try_enumeration(input: TokenStream) -> Result<TokenStream, Error> {
                     #(#from,)*
                     _ => ::core::option::Option::None,
                 }
+            }
+
+            #[inline]
+            pub fn encode<B>(tag: u32, value: &#ident, buf: &mut B) where B: ::prost::bytes::BufMut {
+                ::prost::encoding::int32::encode(tag, unsafe { ::core::mem::transmute(value) }, buf)
+            }
+
+            #[inline]
+            pub fn encode_repeated<B>(tag: u32, values: &[#ident], buf: &mut B) where B: ::prost::bytes::BufMut {
+                ::prost::encoding::int32::encode_repeated(tag, unsafe { ::core::mem::transmute(values) }, buf)
+            }
+
+            #[inline]
+            pub fn encode_packed<B>(tag: u32, values: &[#ident], buf: &mut B) where B: ::prost::bytes::BufMut {
+                ::prost::encoding::int32::encode_packed(tag, unsafe { ::core::mem::transmute(values) }, buf)
+            }
+
+            #[inline]
+            pub fn encoded_len(tag: u32, value: &#ident) -> usize {
+                ::prost::encoding::int32::encoded_len(tag, unsafe { ::core::mem::transmute(value) })
+            }
+
+            #[inline]
+            pub fn encoded_len_repeated(tag: u32, values: &[#ident]) -> usize {
+                ::prost::encoding::int32::encoded_len_repeated(tag, unsafe { ::core::mem::transmute(values) })
+            }
+
+            #[inline]
+            pub fn encoded_len_packed(tag: u32, values: &[#ident]) -> usize {
+                ::prost::encoding::int32::encoded_len_packed(tag, unsafe { ::core::mem::transmute(values) })
+            }
+
+            pub fn merge<B>(wire_type: ::prost::encoding::WireType, value: &mut #ident, buf: &mut B, _ctx: ::prost::encoding::DecodeContext) -> ::core::result::Result<(), ::prost::DecodeError> where B: ::prost::bytes::Buf {
+                let mut num = *value as i32;
+                ::prost::encoding::int32::merge(wire_type, &mut num, buf, _ctx)?;
+                if let Some(enumeration) = Self::from_i32(num) {
+                    *value = enumeration;
+                    return Ok(());
+                }
+                let msg = ::prost::alloc::format!("{} is not a valid {}", num, ::core::stringify!(#ident));
+                Err(::prost::DecodeError::new(::prost::alloc::borrow::Cow::Owned(msg)))
+            }
+
+            pub fn merge_repeated<B>(wire_type: ::prost::encoding::WireType, values: &mut ::prost::alloc::vec::Vec<#ident>, buf: &mut B, ctx: ::prost::encoding::DecodeContext) -> ::core::result::Result<(), ::prost::DecodeError> where B: ::prost::bytes::Buf {
+                let len = values.len();
+                let nums = unsafe { ::core::mem::transmute::<_, &mut ::prost::alloc::vec::Vec<i32>>(values) };
+                ::prost::encoding::int32::merge_repeated(wire_type, nums, buf, ctx)?;
+                for num in nums.iter().copied() {
+                    let Some(enumeration) = Self::from_i32(num) else {
+                        unsafe { nums.set_len(len) };
+                        let msg = ::prost::alloc::format!("{} is not a valid {}", num, ::core::stringify!(#ident));
+                        return Err(::prost::DecodeError::new(::prost::alloc::borrow::Cow::Owned(msg)));
+                    };
+                }
+                Ok(())
             }
         }
 
